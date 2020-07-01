@@ -5,6 +5,7 @@ import (
 	"cs408/labrpc"
 	"math/big"
 	"strconv"
+	"strings"
 )
 
 var CONTEXTSEPARATOR = ":"
@@ -46,10 +47,14 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	var cmd strings.Builder
+	cmd.WriteString("Get")
+	cmd.WriteString(OPSeparator)
+	cmd.WriteString(key)
 	getArgs := &GetArgs{
-		Key: key,
 		Op: Op{
-			ContextId: strconv.FormatInt(nrand(), 10) + CONTEXTSEPARATOR + strconv.FormatInt(nrand(), 10),
+			ContextId: strconv.FormatInt(nrand(), 36) + CONTEXTSEPARATOR + strconv.FormatInt(nrand(), 12),
+			Cmd:       cmd.String(),
 		},
 	}
 
@@ -62,18 +67,30 @@ func (ck *Clerk) Get(key string) string {
 				for i, s := range ck.servers {
 					reply := &GetReply{}
 					ok := s.Call("RaftKV.Get", getArgs, reply)
+					if reply.Err == ErrNoKey {
+						// log error
+						return reply.Value
+					}
 					if !ok || reply.WrongLeader {
 						continue
 					}
 					ck.lastLeader = i
-					return reply.Value
+					if reply.Err == OK {
+						DPrintf("Success get: contextID: %s", getArgs.Op.ContextId)
+						return reply.Value
+					}
 				}
 			} else {
 				reply := &GetReply{}
 				ok := ck.servers[ck.lastLeader].Call("RaftKV.Get", getArgs, reply)
+				if reply.Err == ErrNoKey {
+					// log error
+					return reply.Value
+				}
 				if !ok || reply.WrongLeader {
 					ck.lastLeader = -1
-				} else {
+				} else if reply.Err == OK {
+					DPrintf("Success get: contextID: %s", getArgs.Op.ContextId)
 					return reply.Value
 				}
 			}
@@ -93,37 +110,57 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+
+	var cmd strings.Builder
+	cmd.WriteString(op)
+	cmd.WriteString(OPSeparator)
+	cmd.WriteString(key)
+	cmd.WriteString(KeyValueSeparator)
+	cmd.WriteString(value)
 	args := &PutAppendArgs{
-		Key:    key,
-		Value:  value,
-		OpType: op,
 		Op: Op{
-			ContextId: strconv.FormatInt(nrand(), 10) + CONTEXTSEPARATOR + strconv.FormatInt(nrand(), 10),
+			ContextId: strconv.FormatInt(nrand(), 36) + CONTEXTSEPARATOR + strconv.FormatInt(nrand(), 36),
+			Cmd:       cmd.String(),
 		},
 	}
-
+	// var prevLdr int = ck.lastLeader
+	// DPrintf("begin args: %v", args)
 	for {
 		if ck.lastLeader < 0 {
 			for i := range ck.servers {
 				reply := &PutAppendReply{}
 				ok := ck.servers[i].Call("RaftKV.PutAppend", args, reply)
 				if !ok || reply.WrongLeader {
-					// DPrintf("noleader %v, %v", ok, reply.WrongLeader)
+					// DPrintf("noleader %v, %v, %v", ok, reply.WrongLeader, args)
 					continue
 				}
 				ck.lastLeader = i
-				// DPrintf("Here")
-				return
+				if args.Tries > 0 {
+					if reply.Err == OK {
+						DPrintf("Success append: contextID: %s", args.Op.ContextId)
+						return
+					}
+					args.Tries = 0
+				} else if reply.Err == OK {
+					args.Tries++
+				}
+				break
 			}
 		} else {
 			reply := &PutAppendReply{}
 			ok := ck.servers[ck.lastLeader].Call("RaftKV.PutAppend", args, reply)
 			if !ok || reply.WrongLeader {
-				// DPrintf("noleader2  %v, %v", ok, reply.WrongLeader)
+				// DPrintf("noleader2  %v, %v, %v", ok, reply.WrongLeader, args)
+				// prevLdr = ck.lastLeader
 				ck.lastLeader = -1
-			} else {
-				// DPrintf("Here")
-				return
+			} else if args.Tries > 0 {
+				if reply.Err == OK {
+					DPrintf("Success append: contextID: %s", args.Op.ContextId)
+					return
+				}
+				args.Tries = 0
+			} else if reply.Err == OK {
+				args.Tries++
 			}
 		}
 	}

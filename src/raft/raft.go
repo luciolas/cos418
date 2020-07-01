@@ -169,9 +169,10 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm.Load())
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.logs)
-	e.Encode(rf.logidx.Load())
+	// e.Encode(rf.logidx.Load())
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
+
 }
 
 //
@@ -192,8 +193,9 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&term)
 	d.Decode(&rf.VotedFor)
 	d.Decode(&rf.logs)
-	d.Decode(&logidx)
+	// d.Decode(&logidx)
 	rf.currentTerm.Set(term)
+	logidx = int32(len(rf.logs) - 1)
 	rf.logidx.Set(logidx)
 	fmt.Printf("%d: restore logs %v\n", rf.me, rf.logs)
 }
@@ -300,10 +302,10 @@ func (rf *Raft) HeartBeat(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	currentTerm := rf.currentTerm.Load()
 	reply.Term = currentTerm
 	reply.LastEntry = rf.logs[len(rf.logs)-1]
-	DPrintf("%d: Args: %v", rf.me, args)
+	// DPrintf("%d: Args: %v", rf.me, args)
 
 	if args.Term < currentTerm {
-		DPrintf("%d: 1", rf.me)
+		// DPrintf("%d: 1", rf.me)
 		return
 	}
 	// DPrintf("%d: HB rpc from %d term %d and me %d", rf.me, args.LeaderID, args.Term, currentTerm)
@@ -330,10 +332,10 @@ func (rf *Raft) HeartBeat(args AppendEntriesArgs, reply *AppendEntriesReply) {
 		rf.logs = rf.logs[:currPrevLogIdx]
 		reply.LastEntry = rf.logs[currPrevLogIdx-1]
 		rf.logidx.Set(reply.LastEntry.Index)
-		// DPrintf("%d: 2", rf.me)
+		DPrintf("%d: 2", rf.me)
 		return
 	} else if int32(prevLogIdx) > reply.LastEntry.Index {
-		// DPrintf("%d: 4", rf.me)
+		DPrintf("%d: 4, %v", rf.me, reply)
 		return
 	}
 
@@ -346,7 +348,7 @@ func (rf *Raft) HeartBeat(args AppendEntriesArgs, reply *AppendEntriesReply) {
 			rf.logs = append(rf.logs[:v.Index], args.Entries[i:]...)
 			break
 		} else if v.Index > reply.LastEntry.Index {
-			// DPrintf("%d: 3", rf.me)
+			DPrintf("%d: 3", rf.me)
 			return
 		}
 	}
@@ -367,7 +369,7 @@ func (rf *Raft) HeartBeat(args AppendEntriesArgs, reply *AppendEntriesReply) {
 			rf.lastApplied.Set(newCommitIdx)
 			rf.commitIdx.Set(newCommitIdx)
 			toApply := rf.logs[oldLastApplied+1 : newCommitIdx+1]
-			DPrintf("%d: Follower apply log from %d, %d", rf.me, oldLastApplied+1, newCommitIdx+1)
+			DPrintf("%d: Follower apply log from %d, %d, last: %v", rf.me, oldLastApplied+1, newCommitIdx+1, rf.logs[newCommitIdx])
 			for _, v := range toApply {
 				rf.applyChnl <- ApplyMsg{
 					Index:       int(v.Index),
@@ -381,11 +383,11 @@ func (rf *Raft) HeartBeat(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	}
 
 	defer func() {
-		DPrintf("%d: hb frm %d, commitidx: ovt%dv%d, Logs: %v ", rf.me, args.LeaderID, rf.commitIdx.Load(), args.LeaderCommitIdx, rf.logs)
+		// DPrintf("%d: hb frm %d, commitidx: ovt%dv%d, last Logs: %v ", rf.me, args.LeaderID, rf.commitIdx.Load(), args.LeaderCommitIdx, reply.LastEntry)
 	}()
 	rf.persist()
 	if reply.LastEntry.Index < args.PrevLog.Index {
-		// DPrintf("%d: 5", rf.me)
+		DPrintf("%d: 5", rf.me)
 		return
 	}
 	reply.Success = true
@@ -577,14 +579,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				select {
 				case job := <-rf.jobsChnl:
 					numJobs := len(rf.jobsChnl) + 1
-					// if !rf.isLeader.Load() {
-					// 	// DPrintf("%d: Not leader, clearing jobchnl", rf.me)
-					// 	for i := 1; i < numJobs; i++ {
-					// 		<-rf.jobsChnl
-					// 	}
-					// 	rf.logidx.Add(-int32(numJobs))
-					// 	break
-					// }
 
 					count := func(a, b int) int {
 						if a < b {
@@ -599,7 +593,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					// newLogIndex := len(rf.logs)
 					for i := 1; i < count; i++ {
 						j := <-rf.jobsChnl
-						// j.Index = int32(i + newLogIndex)
 						// DPrintf("%d: JIdx: %d, PrevLog:%d, count:%d", rf.me, j.Index, prevLog.Index, count)
 
 						entries[j.Index-prevLog.Index-1] = j
@@ -659,32 +652,26 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				if newIdx <= currCommitIdx || newIdx >= int32(lengthLogs) {
 					continue
 				}
-				var currentMaxReqLenIndex = currCommitIdx
 				_, ok := commitTracker[newIdx]
 				if !ok {
 					commitTracker[newIdx] = 0
 				}
-				for k, v := range commitTracker {
-					if k > currentMaxReqLenIndex && k <= newIdx {
-						commitTracker[k]++
-						v = commitTracker[k]
-					}
-					if v >= reqLen && k > currentMaxReqLenIndex {
-						currentMaxReqLenIndex = k
-					}
-				}
-				if currentMaxReqLenIndex > currCommitIdx {
-					commitIdx := currCommitIdx + 1
-					endIdx := func(a, b int32) int32 {
-						if a < b {
-							return a
-						}
-						return b
-					}(currentMaxReqLenIndex, int32(len(rf.logs)-1))
+				commitTracker[newIdx]++
+				// for k, v := range commitTracker {
+				// 	if k > currentMaxReqLenIndex && k <= newIdx {
+				// 		commitTracker[k]++
+				// 		v = commitTracker[k]
+				// 	}
+				// 	if v >= reqLen && k > currentMaxReqLenIndex {
+				// 		currentMaxReqLenIndex = k
+				// 	}
+				// }
+				DPrintf("%d: commitidx: %d, %d", rf.me, newIdx, commitTracker[newIdx])
+				if commitTracker[newIdx] == reqLen && newIdx > currCommitIdx {
+					endIdx := newIdx
 
-					toApply := rf.logs[commitIdx : endIdx+1]
+					toApply := rf.logs[currCommitIdx+1 : endIdx+1]
 					for _, log := range toApply {
-						DPrintf("%d: apply %v", rf.me, log)
 						rf.applyChnl <- ApplyMsg{
 							Index:       int(log.Index),
 							Command:     log.Cmd,
@@ -692,10 +679,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 							Snapshot:    nil,
 						}
 					}
+					DPrintf("%d: apply %v", rf.me, toApply)
 					rf.commitIdx.Set(endIdx)
 					rf.lastApplied.Set(endIdx)
-					// DPrintf("%d: Apply commit logs %v\ncidx:%d logs:%v", rf.me, toApply, commitIdx, rf.logs)
 					rf.persist()
+					// DPrintf("%d: Apply commit logs %v\ncidx:%d logs:%v", rf.me, toApply, commitIdx, rf.logs)
 				}
 			}
 
@@ -848,7 +836,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					Log:  lastLog,
 				}
 				votingChnl := make(chan bool, len(rf.peers)-1)
-				DPrintf("%d: Election Term %d, next timeout %dms", rf.me, currentTerm, timeout.Milliseconds())
+				// DPrintf("%d: Election Term %d, next timeout %dms", rf.me, currentTerm, timeout.Milliseconds())
 				rf.electionTimer.Reset(timeout)
 				// Tracks the voting for this current election
 				go func(currentTerm int32, votingChnl <-chan bool) {
@@ -867,7 +855,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						case isVoted := <-votingChnl:
 							if isVoted {
 								votes++
-								DPrintf("%d: Votes %d,term %d", rf.me, votes, currentTerm)
+								// DPrintf("%d: Votes %d,term %d", rf.me, votes, currentTerm)
 							} else {
 								// If a false appears, we will quit the voting session
 								return
@@ -893,7 +881,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 									rf.nextIndex[i].Set(int32(len(rf.logs)))
 									rf.matchIndex[i].Set(0)
 								}
-								DPrintf("%d: Leader term %d", rf.me, currentTerm)
+								// DPrintf("%d: Leader term %d", rf.me, currentTerm)
 								return
 							}
 						}
@@ -942,7 +930,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 								rf.isLeader.Set(false)
 								// rf.leaderBeginChnl <- false
 								votingChnl <- reply.Voted
-								DPrintf("%d: Higher term seen %dt server:%d", rf.me, reply.Term, server)
+								// DPrintf("%d: Higher term seen %dt server:%d", rf.me, reply.Term, server)
 							}
 						}(i, args, votingChnl)
 					}
@@ -959,7 +947,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 //DefaultElectionTimeout default
 func DefaultElectionTimeout() time.Duration {
-	return GetRandDuration(300, 700, time.Millisecond)
+	return GetRandDuration(500, 900, time.Millisecond)
 }
 
 func DefaultHeartBeatTimeout() time.Duration {

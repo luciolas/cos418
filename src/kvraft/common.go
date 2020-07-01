@@ -1,6 +1,7 @@
 package raftkv
 
 const (
+	WAIT     = "WAIT"
 	OK       = "OK"
 	ErrNoKey = "ErrNoKey"
 )
@@ -10,13 +11,12 @@ type Err string
 // Put or Append
 type PutAppendArgs struct {
 	// You'll have to add definitions here.
-	Key    string
-	Value  string
-	OpType string // "Put" or "Append"
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Op Op
+	Op    Op
+	OK    bool
+	Tries int
 }
 
 type PutAppendReply struct {
