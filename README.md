@@ -8,7 +8,9 @@
 See also [Raft Github](https://raft.github.io/) for more.
 
 # Notice
-The code is intentionally jumbled up and there are a lot of unnamed goroutines.
+- The code is intentionally jumbled up and there are a lot of unnamed goroutines.
+
+- The src folder also contains MapReduce Golang.
 
 # Interpretation
 My interpretation is based on Producer-Consumer concept. 
