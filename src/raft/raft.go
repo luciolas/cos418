@@ -224,6 +224,8 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.rpcChnl <- OK
+
+	defer rf.persist()
 	// DPrintf("%d: reqvote args %v from %d", rf.me, args, args.ID)
 	// Your code here.
 	currentTerm := rf.currentTerm.Load()
@@ -299,6 +301,7 @@ type AppendEntriesReply struct {
 // Followers will have their log entries updated and reply.
 func (rf *Raft) HeartBeat(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.rpcChnl <- OK
+	defer rf.persist()
 	currentTerm := rf.currentTerm.Load()
 	reply.Term = currentTerm
 	reply.LastEntry = rf.logs[len(rf.logs)-1]
@@ -325,7 +328,7 @@ func (rf *Raft) HeartBeat(args AppendEntriesArgs, reply *AppendEntriesReply) {
 		// find the first entry of the wrong term
 		conflictingTerm := rf.logs[prevLogIdx].Term
 		currPrevLogIdx := prevLogIdx
-		for rf.logs[currPrevLogIdx].Term == conflictingTerm && currPrevLogIdx != 1 {
+		for rf.logs[currPrevLogIdx].Term == conflictingTerm && currPrevLogIdx != 0 {
 			currPrevLogIdx--
 		}
 		currPrevLogIdx++
@@ -385,7 +388,6 @@ func (rf *Raft) HeartBeat(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	defer func() {
 		// DPrintf("%d: hb frm %d, commitidx: ovt%dv%d, last Logs: %v ", rf.me, args.LeaderID, rf.commitIdx.Load(), args.LeaderCommitIdx, reply.LastEntry)
 	}()
-	rf.persist()
 	if reply.LastEntry.Index < args.PrevLog.Index {
 		DPrintf("%d: 5", rf.me)
 		return
@@ -639,7 +641,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		commitTracker := make(map[int32]int32)
 		reqLen := int32(len(rf.peers) / 2)
 
-		defer DPrintf("%d: Exited logs:%v", rf.me, rf.logs)
+		defer DPrintf("%d: Exited logs", rf.me)
 		for {
 			select {
 			case <-rf.stopChnl:
@@ -682,7 +684,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					DPrintf("%d: apply %v", rf.me, toApply)
 					rf.commitIdx.Set(endIdx)
 					rf.lastApplied.Set(endIdx)
-					rf.persist()
+					// rf.persist()
 					// DPrintf("%d: Apply commit logs %v\ncidx:%d logs:%v", rf.me, toApply, commitIdx, rf.logs)
 				}
 			}
@@ -726,6 +728,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 							// DPrintf("%d: HeartBeat RPC failed send to %d", rf.me, server)
 							break
 						}
+
 						// DPrintf("%d: HeartBeat reply frm %d %v", rf.me, server, reply)
 						if reply.Success {
 							// Reply  successful
@@ -797,7 +800,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			// }
 			select {
 			case <-rf.termChangeChnl:
-				rf.persist()
+				// rf.persist()
 			default:
 			}
 
@@ -920,6 +923,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 							// }
 							// Send true votes or error votes
 							if reply.Voted {
+								DPrintf("%d: recev vote frm: %d", rf.me, server)
 								votingChnl <- reply.Voted
 							} else if reply.Term > rf.currentTerm.Load() {
 								// revert to follower
@@ -947,7 +951,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 //DefaultElectionTimeout default
 func DefaultElectionTimeout() time.Duration {
-	return GetRandDuration(500, 900, time.Millisecond)
+	return GetRandDuration(150, 500, time.Millisecond)
 }
 
 func DefaultHeartBeatTimeout() time.Duration {
@@ -955,7 +959,7 @@ func DefaultHeartBeatTimeout() time.Duration {
 }
 
 func DefaultReqVoteTimeout() time.Duration {
-	return 300 * time.Millisecond
+	return 150 * time.Millisecond
 }
 
 func DefaultHeartBeatTime() time.Duration {

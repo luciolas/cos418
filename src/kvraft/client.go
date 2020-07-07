@@ -131,19 +131,27 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				reply := &PutAppendReply{}
 				ok := ck.servers[i].Call("RaftKV.PutAppend", args, reply)
 				if !ok || reply.WrongLeader {
+					DPrintf("(?)Rpc append failed: reply: %v, ctx: %v", reply, args.Op.ContextId)
 					// DPrintf("noleader %v, %v, %v", ok, reply.WrongLeader, args)
 					continue
 				}
 				ck.lastLeader = i
-				if args.Tries > 0 {
-					if reply.Err == OK {
+
+				if reply.Err == OK {
+					if args.Idx > 0 {
 						DPrintf("Success append: contextID: %s", args.Op.ContextId)
 						return
 					}
+					if args.Idx < reply.Idx {
+						args.Idx = reply.Idx
+					}
+					args.Tries = 1
+				} else if args.Idx > 0 && reply.Err == ErrNoKey {
+					DPrintf("failed append: contextID: %s", args.Op.ContextId)
 					args.Tries = 0
-				} else if reply.Err == OK {
-					args.Tries++
+					args.Idx = 0
 				}
+
 				break
 			}
 		} else {
@@ -152,16 +160,27 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			if !ok || reply.WrongLeader {
 				// DPrintf("noleader2  %v, %v, %v", ok, reply.WrongLeader, args)
 				// prevLdr = ck.lastLeader
-				ck.lastLeader = -1
-			} else if args.Tries > 0 {
-				if reply.Err == OK {
+				DPrintf("(?)Rpc append failed: reply: %v, ctx: %v", reply, args.Op.ContextId)
+				if reply.WrongLeader {
+					ck.lastLeader = -1
+				}
+				continue
+			}
+			if reply.Err == OK {
+				if args.Idx > 0 {
 					DPrintf("Success append: contextID: %s", args.Op.ContextId)
 					return
 				}
+				if args.Idx < reply.Idx {
+					args.Idx = reply.Idx
+				}
+				args.Tries = 1
+			} else if args.Idx > 0 && reply.Err == ErrNoKey {
+				DPrintf("failed append: contextID: %s", args.Op.ContextId)
 				args.Tries = 0
-			} else if reply.Err == OK {
-				args.Tries++
+				args.Idx = 0
 			}
+
 		}
 	}
 

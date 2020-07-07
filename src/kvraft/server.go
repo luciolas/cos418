@@ -8,10 +8,9 @@ import (
 	"log"
 	"strings"
 	"sync"
-	"time"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -44,14 +43,14 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	// Raft Log
+	// commited raft Log
 	log map[int]string
 
-	// Fake database
+	// Fake database (state machine)
 	db map[string]string
 
 	// Read ops chan
-	ops map[string]chan struct {
+	ops map[int]chan struct {
 		Val string
 		Ok  bool
 	}
@@ -74,11 +73,12 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// } else {
 	// 	return
 	// }
-	_, _, _ = kv.rf.Start(args.Op)
-	_, ok := kv.ops[args.Op.ContextId]
+	idx, _, _ := kv.rf.Start(args.Op)
+	kv.context[args.Op.ContextId] = idx
+	_, ok := kv.ops[idx]
 	if !ok {
 		kv.mu.Lock()
-		kv.ops[args.Op.ContextId] = make(chan struct {
+		kv.ops[idx] = make(chan struct {
 			Val string
 			Ok  bool
 		}, 1)
@@ -90,19 +90,19 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		Val string
 		Ok  bool
 	}
+
 	select {
-	case re = <-kv.ops[args.Op.ContextId]:
-	case <-time.After(10 * time.Second):
-		return
+	case re = <-kv.ops[idx]:
+		kv.ops[idx] <- re
 	}
 	DPrintf("get done %s", args.Op.ContextId)
-	key, val := parseCmd(re.Val)
+	key, val := splitPutAppendCmd(re.Val)
 	// delete(kv.ops, idx)
-	if !re.Ok {
-		reply.Err = ErrNoKey
-	} else if key == GET {
+	if key == args.Op.Cmd {
 		reply.Value = val
 		reply.Err = OK
+	} else if key == args.Op.Cmd {
+		reply.Err = ErrNoKey
 	}
 }
 
@@ -115,55 +115,50 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	if !isLeader {
 		return
 	}
+	var idx int = args.Idx
+	var ok bool
 	var re struct {
 		Val string
 		Ok  bool
 	}
-	kv.mu.Lock()
-	_, ok := kv.context[args.Op.ContextId]
-	if !ok {
-		kv.context[args.Op.ContextId] = 0
-	}
-	kv.mu.Unlock()
-	if args.Tries < 1 {
-		DPrintf("Context: args: %v", args)
-		_, _, _ = kv.rf.Start(args.Op)
-		// DPrintf("%v leader", isLeader)
-		_, ok := kv.ops[args.Op.ContextId]
-		if !ok {
-			kv.mu.Lock()
-			kv.ops[args.Op.ContextId] = make(chan struct {
-				Val string
-				Ok  bool
-			}, 1)
-			kv.mu.Unlock()
-		}
-		// DPrintf("append waiting %s", args.Op.ContextId)
-		reply.Err = OK
-	} else {
-		DPrintf("Waiting on ctx: %s", args.Op.ContextId)
-		select {
-		case re = <-kv.ops[args.Op.ContextId]:
-			// delete(kv.ops, idx)
-			if re.Ok && re.Val == args.Op.Cmd {
-				reply.Err = OK
-				reply.WrongLeader = false
-				DPrintf("Correct Value %v, at %s", re.Val, args.Op.ContextId)
-			} else {
-				DPrintf("Wrong Value %v, at %s", re.Val, args.Op.ContextId)
-			}
-		case <-time.After(10 * time.Second):
-			DPrintf("Timeout Ctx:%s", args.Op.ContextId)
-			logidx, ok := kv.context[args.Op.ContextId]
-			if !ok {
-				kv.context[args.Op.ContextId] = 0
-			} else if args.Op.Cmd == kv.log[logidx] {
-				reply.Err = OK
-				DPrintf("Correct Value %v, at %s", args.Op.Cmd, args.Op.ContextId)
-			}
-		}
 
+	DPrintf("Context: args: %v", args)
+
+	// DPrintf("%v leader", isLeader)
+	if args.Idx == 0 {
+		idx, ok := kv.context[args.Op.ContextId]
+		if !ok {
+			idx, _, _ = kv.rf.Start(args.Op)
+			kv.context[args.Op.ContextId] = idx
+		}
+		reply.Err = OK
+		reply.Idx = idx
+		return
 	}
+	_, ok = kv.ops[idx]
+	if !ok {
+		kv.mu.Lock()
+		kv.ops[idx] = make(chan struct {
+			Val string
+			Ok  bool
+		}, 1)
+		kv.mu.Unlock()
+	}
+	// DPrintf("append waiting %s", args.Op.ContextId)
+	DPrintf("Waiting on ctx: %s", args.Op.ContextId)
+	select {
+	case re = <-kv.ops[idx]:
+		kv.ops[idx] <- re
+		// delete(kv.ops, idx)
+		if re.Ok && re.Val == args.Op.Cmd {
+			reply.Err = OK
+			DPrintf("Correct Value %v, at %s", re.Val, args.Op.ContextId)
+		} else {
+			reply.Err = ErrNoKey
+			DPrintf("Wrong Value %v, at %s", re.Val, args.Op.ContextId)
+		}
+	}
+
 }
 
 //
@@ -200,7 +195,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// Your initialization code here.
-	kv.ops = make(map[string]chan struct {
+	kv.ops = make(map[int]chan struct {
 		Val string
 		Ok  bool
 	})
@@ -238,53 +233,81 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 						kv.mu.Lock()
 						// fmt.Printf("put %v\n", v)
 						kv.db[k] = v
-						kv.ops[m.ContextId] = make(chan struct {
-							Val string
-							Ok  bool
-						}, 1)
+						if _, ok := kv.ops[msg.Index]; !ok {
+							kv.ops[msg.Index] = make(chan struct {
+								Val string
+								Ok  bool
+							}, 1)
+						}
 						kv.mu.Unlock()
-						kv.ops[m.ContextId] <- struct {
+						select {
+						case kv.ops[msg.Index] <- struct {
 							Val string
 							Ok  bool
-						}{m.Cmd, true}
+						}{m.Cmd, true}:
+						default:
+						}
+
 					case APPEND:
 						k, v := splitPutAppendCmd(val)
 						if _, ok := kv.db[k]; ok {
 							// fmt.Printf("append %v\n", v)
 							kv.mu.Lock()
 							kv.db[k] += v
-							kv.ops[m.ContextId] = make(chan struct {
-								Val string
-								Ok  bool
-							}, 1)
+							if _, ok := kv.ops[msg.Index]; !ok {
+								kv.ops[msg.Index] = make(chan struct {
+									Val string
+									Ok  bool
+								}, 1)
+							}
 							kv.mu.Unlock()
-							kv.ops[m.ContextId] <- struct {
+							select {
+							case kv.ops[msg.Index] <- struct {
 								Val string
 								Ok  bool
-							}{m.Cmd, true}
+							}{m.Cmd, true}:
+							default:
+							}
 						}
 					case GET:
 						kv.mu.Lock()
-						kv.ops[m.ContextId] = make(chan struct {
-							Val string
-							Ok  bool
-						}, 1)
+						if _, ok := kv.ops[msg.Index]; !ok {
+							kv.ops[msg.Index] = make(chan struct {
+								Val string
+								Ok  bool
+							}, 1)
+						}
 						kv.mu.Unlock()
 						if getVal, ok := kv.db[val]; ok {
-							kv.ops[m.ContextId] <- struct {
+							select {
+							case kv.ops[msg.Index] <- struct {
 								Val string
 								Ok  bool
-							}{GET + OPSeparator + getVal, ok}
+							}{m.Cmd + KeyValueSeparator + getVal, true}:
+							default:
+							}
+
 						} else {
-							kv.ops[m.ContextId] <- struct {
+							select {
+							case kv.ops[msg.Index] <- struct {
 								Val string
 								Ok  bool
-							}{"", false}
+							}{"", false}:
+							default:
+							}
 						}
 					}
 
 				} else {
 					kv.errCh <- fmt.Sprintf("%d: msg:%v already in idx:%d, old:%v", kv.me, m, msg.Index, old)
+					select {
+					case kv.ops[msg.Index] <- struct {
+						Val string
+						Ok  bool
+					}{old, true}:
+					default:
+					}
+
 				}
 			} else {
 				kv.errCh <- fmt.Sprintf("%d: msg:%v, idx:%d is not a string", kv.me, m, msg.Index)

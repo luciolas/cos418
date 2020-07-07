@@ -17,11 +17,13 @@ type PutAppendArgs struct {
 	Op    Op
 	OK    bool
 	Tries int
+	Idx   int
 }
 
 type PutAppendReply struct {
 	WrongLeader bool
 	Err         Err
+	Idx         int
 }
 
 type GetArgs struct {
